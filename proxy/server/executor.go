@@ -16,6 +16,7 @@ package server
 
 import (
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -56,7 +57,7 @@ type SessionExecutor struct {
 	txConns map[string]*backend.PooledConnection
 
 	stmtID uint32
-	stmts  map[uint32]*Stmt //prepare相关,client端到proxy的stmt
+	stmts  map[uint32]*Stmt // prepare相关,client端到proxy的stmt
 
 	parser *parser.Parser
 }
@@ -488,7 +489,7 @@ func (se *SessionExecutor) executeInMultiSlices(reqCtx *util.RequestContext, pcs
 
 	offset := 0
 	for sliceName, pc := range pcs {
-		s := sqls[sliceName] //map[string][]string
+		s := sqls[sliceName] // map[string][]string
 		go f(reqCtx, rs, offset, s, pc)
 		for _, sqlDB := range sqls[sliceName] {
 			offset += len(sqlDB)
@@ -660,8 +661,30 @@ func (se *SessionExecutor) rollback() (err error) {
 	return
 }
 
+func (se *SessionExecutor) BeforeExecuteSQL(reqCtx *util.RequestContext, slice, db, sql string) {
+	delayString := os.Getenv("DELAY_MASTER_EXEC_MILLISECOND")
+	if delayString == "" {
+		return
+	}
+
+	delay, err := strconv.ParseInt(delayString, 10, 0)
+	if err != nil || delay <= 0 {
+		return
+	}
+
+	if getFromSlave(reqCtx) {
+		if _, err := se.GetNamespace().GetSlice("slice-0").GetSlaveConn(); err == nil {
+			return
+		}
+	}
+
+	log.Notice("execute sql %s delay %s", sql, delayString)
+	time.Sleep(time.Duration(delay) * time.Millisecond)
+}
+
 // ExecuteSQL execute sql
 func (se *SessionExecutor) ExecuteSQL(reqCtx *util.RequestContext, slice, db, sql string) (*mysql.Result, error) {
+	se.BeforeExecuteSQL(reqCtx, slice, db, sql)
 	pc, err := se.getBackendConn("slice-0", getFromSlave(reqCtx))
 	defer se.recycleBackendConn(pc, false)
 	if err != nil {
